@@ -1,35 +1,58 @@
-###### Creating operational layer
+###### OPERATIONAL LAYER
 
 create schema if not exists imdb_full;
 use imdb_full;
 
 ### Dropping unnecessary tables
 
-drop table movies2producers;
-drop table movies2editors;
-drop table movies2writers;
-drop table business;
-drop table countries;
-drop table distributors;
-drop table editors;
-drop table writers;
-drop table prodcompanies;
-drop table producers;
+drop table if exists movies2producers;
+drop table if exists movies2editors;
+drop table if exists movies2writers;
+drop table if exists business;
+drop table if exists countries;
+drop table if exists distributors;
+drop table if exists editors;
+drop table if exists writers;
+drop table if exists prodcompanies;
+drop table if exists producers;
 
-### Adding a timestamp variable to ratings table that is supposed to be updated
 
-alter table ratings
-add datestamp date;
 
-set sql_safe_updates = 0;
-update ratings
-set datestamp = current_date();
-set sql_safe_updates = 1;
+###### ANALYTICS
 
-###### Creating analytical layer
+# For the project, I decided to work with the iMDB dataset that was stored within Workbench 
+# My first idea was to research who plays a more defining role in the public rating of the film:
+# the director or the artist? For that, I decided to create a table with movies and its ratings,
+# as well as with directors' and actors' average rating across all their films, so that it would 
+# be later (not here) possible to run a linear regression and see which coefficient is higher.
+# For that aim, I decided to take only the leading actor (since they are most defining character
+# for the public score, as well as all the directors. Since some films have several directors,
+# I had to average the results of director's average rating by film (across all film's directors.
+# Furthermore, I wanted to study variance in ratings. For that I devised a complex procedure that
+# translate a string vaguely describing the distribution of scores into approximate variance.
+# Later with this data I was able to see which genres are most controversial.
+# Also I could check whether films with females or males in the leading role are better marked.
+# And finally I was able to create a watchlist of the best films of the 70s.
+
+
+
+###### ANALYTICAL LAYER
 
 ### Calculating appproximate variance of the ratings of each film
- 
+# the distribution is expressed in a 10-digit string form. Each digit corresponds to
+# a specific rate (the first digit to mark 1, second — 2, tenth - 10, and so on).
+# Each digit represents floor(n_mark/n_all*10). If there is not one such mark, it is '.'
+# So, '2.00000012' would represent that there are
+# no marks 2
+# 10-20% marks 9
+# 20-30% marks 1 and 10
+# 0-10% all the rest of marks
+# To approximate variance I create an auxiliary table for each distribution string
+# where I store the corresponding approximation of marks
+# (for our example above it would be 1,1,9,10,10)
+# and calculate variance of this set to store it in a new table ratings_var
+# !!! If the event is activated, the procedure may need to be called several times.
+
 drop procedure if exists calculate_variance;
 delimiter //
 
@@ -52,8 +75,7 @@ begin
     drop table if exists ratings_var;
     create table ratings_var
 		(movieid int,
-        approx_var double)
-        ;
+        approx_var double);
  
     open score_cursor;
     
@@ -66,6 +88,7 @@ begin
         
         truncate table expanded_values;
         
+        # Get the number of each mark in digit
         set i=1;
         while i<11 do
 			if substring(dist_string, i, 1) = '.' then
@@ -74,6 +97,8 @@ begin
 				set digit = cast(substring(dist_string, i, 1) as unsigned);
 			end if;
             set count = 1;
+            
+            # Add the mark digit times to the set
             while count < digit+1 do
 				insert into expanded_values(score_id, value)
                 values (current_id, i);
@@ -96,8 +121,11 @@ delimiter ;
 call calculate_variance();
 
 
+### Directors and Actors averages
 
-### Creating denormalised table for directors and scores
+# For my central aim, I decided to create several working tables to calculate
+# the averages for directors and artists.
+# First, I creating denormalised table for directors and join the scores
 
 drop table if exists dir_denorm;
 create table dir_denorm as
@@ -120,11 +148,7 @@ create table dir_denorm as
 	inner join
 		directors using (directorid);
         
-select count(*) from (select count(*) as a from dir_denorm group by movieid, directorid having not a=1) as rr;
-select count(*) from (select count(*) as a from dir_denorm group by movieid, directorid having a=1) as rr;
-
-
-### Creating a working table for average scores of all directors with the numbers of films
+# Then, I create a table for average scores of each director also with the numbers of films
 
 drop procedure if exists create_dir_rat;
 delimiter //
@@ -141,15 +165,14 @@ create table dir_rat as
         count(score) as num_films,
         sum(votes) as votes
 	from dir_denorm
-    group by directorid, director, dirnum;
+    group by directorid, director;
     
 end//
 
 delimiter ;
 call create_dir_rat();
 
-
-### Creating denormalised table for actors and scores
+# Then I do the same for actors
 
 drop table if exists act_denorm;
 create table act_denorm as
@@ -173,12 +196,8 @@ create table act_denorm as
 	inner join
 		actors using (actorid);
         
-select count(*) from (select count(*) as a from act_denorm group by movieid, actorid having not a=1) as rr;
-select count(*) from (select count(*) as a from act_denorm group by movieid, actorid having a=1) as rr;
-
-        
-
-### Creating a working table for average scores of all leading artists with the numbers of films (only those playing the leading role are considered)
+# However, here I only consider the leading actor, as they are ranked
+# and as the leading actor plays the most important role for film's score.
 
 drop procedure if exists create_act_rat;
 delimiter //
@@ -202,11 +221,10 @@ end//
 delimiter ;
 call create_act_rat();
 
-
 ### Creating an aggregated table for movies and the calculated data
 ### (group by movie since there are some movies which were directed
 ### by more than one person, so for them the average director's score
-### is the average of the average scores of all its directors
+### is the average of the average scores of all its directors)
 
 drop procedure if exists create_aggreg;
 delimiter //
@@ -220,13 +238,15 @@ create table aggreg as
         movies.title as title,
         movies.year as year,
         ratings.rank as film_score,
+        (select genre from movies2directors where movies2directors.movieid = movies.movieid limit 1) as genre,
         movies2actors_lead.actorid as actorid,
         actors.sex as actor_sex,
         act_rat.avg_score as act_score,
-#        movies2directors.directorid as directorid,
         avg(dir_rat.avg_score) as dir_score,
         act_rat.num_films as act_films,
         dir_rat.num_films as dir_films,
+        ratings.votes as film_votes,
+        ratings.distribution as score_dist,
         ratings_var.approx_var as approx_var
 	from
 		movies
@@ -247,88 +267,157 @@ create table aggreg as
 			on dir_rat.directorid = movies2directors.directorid
 	inner join
 		ratings_var using (movieid)
-	group by movieid, title, year, film_score, actorid, act_score, act_films, dir_films, approx_var, sex;
+	group by movieid, title, year, film_score, actorid, act_score, act_films,
+			dir_films, approx_var, actor_sex, film_votes, score_dist, genre;
 end//
 
 delimiter ;
 call create_aggreg();
 
-select * from dir_denorm;
+select * from aggreg;
 
 
 
+###### ETL PIPELINE
 
+### Trigger
 
-drop procedure if exists update_variance;
+# For the updates of the database, I decided to consider the most obvious and
+# continuous update — the update of user ratings. After the ratings are changed —
+# I consider the table being updated with new information for movieid —
+# the corresponding changes are made to the analytic tables.
+
+# Because of the complicated structure of data and many auxilliary tables,
+# it was nearly impossible to update all of them by trigger, as it does not
+# allow for using procedures that alter data structures.
+# I decided to compomise it in this way:
+# I will triger only the first denorm tables for actors and directors that 
+# may be easily amended selectively:
+
+drop trigger if exists update_primary_denorms;
+
 delimiter //
 
-create procedure update_variance(
-			in dist_string varchar(10),
-            out approx_var double)
-begin
-	declare i int default 1;
-    declare count int;
-    declare digit int;
-    declare dist_string varchar(10);
-    
-	create table if not exists expanded_values (
-		score_id int,
-        value int
-	);
-	truncate table expanded_values;
-        
-        set i=1;
-        while i<11 do
-			if substring(dist_string, i, 1) = '.' then
-				set digit = 0;
-			else
-				set digit = cast(substring(dist_string, i, 1) as unsigned);
-			end if;
-            set count = 1;
-            while count < digit+1 do
-				insert into expanded_values(score_id, value)
-                values (current_id, i);
-                set count = count + 1;
-			end while;
-            set i = i+1;
-		end while;
-        
-        select var_pop(value)
-        into approx_var
-        from expanded_values;
-        
-end//
-
-drop trigger if exists update_all;
-
-create trigger update_all
+create trigger update_primary_denorms
 after update
 on ratings for each row
 begin
 	update dir_denorm
 		set
 			score = new.rank,
-            votes = new.votes
+            votes = new.votes,
+            dist = new.distribution
 		where dir_denorm.movieid = new.movieid;
     update act_denorm
 		set
 			score = new.rank,
-            votes = new.votes
+            votes = new.votes,
+			dist = new.distribution
 		where act_denorm.movieid = new.movieid;
-	call update_variance(new.distribution, @approx_var);
-    update ratings_var
-		set approx_var = @approx_var
-        where ratings_var.movieid = new.movieid
-			
-	call create_dir_rat();
-    call create_act_rat();
-    call create_aggreg();
 
 end //
 
 delimiter ;
 
 
+### Event
+
+# To introduce all the other changes that require altering data structures
+# and using stored procedures, I decided to use an event that recombines
+# all the tables with the new data every minute.
+# The result of the change in aggreg can be tested in the end of the script.
+
+drop event if exists update_all;
+delimiter // 
+
+create event update_all
+on schedule every 1 minute
+do
+begin
+	call calculate_variance();
+	call create_dir_rat();
+    call create_act_rat();
+    call create_aggreg();
+end //
+delimiter ;
+
+
+### Testing triggers
+
+set sql_safe_updates = 0;
+
+	select * from dir_denorm where movieid = 1672052;
+	update ratings
+		set
+			`rank` = 8.9,
+			votes = 10000000,
+			distribution = '0100000008'
+		where movieid = 1672052;
+	select * from dir_denorm where movieid = 1672052;
+	update ratings
+		set
+			`rank` = 7.8,
+			votes = 8111,
+			distribution = '0000001222'
+		where movieid = 1672052;
+	select * from dir_denorm where movieid = 1672052;
+    
+set sql_safe_updates = 1;
+
+
+
+###### DATA MART
+
+### Here I create four different datamarts that show the versatility of the aggreg table
+
+# The table for the linear regression to see is director or actor playing a more important
+# role in the film's popular assessment (I set the number of films for each dir/act 
+# equal or higher than 5 to avoid high correlation.
+
+drop view if exists avg_actdir_scores;
+create view avg_actdir_scores as
+	select movieid, title, film_score, act_score, dir_score
+		from aggreg
+		where  act_films > 4 and dir_films > 4;
+select * from avg_actdir_scores;
+
+# A small data mart that aggregates all films and shows if men or women in leading role
+# are better assessed.
+
+drop view if exists mf_lead_avg_scores;
+create view mf_lead_avg_scores as
+	select actor_sex, avg(film_score)
+		from aggreg
+        group by actor_sex;
+select * from mf_lead_avg_scores;
+
+# Here I take a look on how the controversy in public about the films is distributed by genre
+
+drop view if exists var_by_genre;
+create view var_by_genre as
+	select genre, avg(approx_var) as var
+		from aggreg
+        group by genre
+        having not genre=''
+        order by var;
+select * from var_by_genre;
+
+# And here I create a suggestion of the best movies from the 80s
+
+drop view if exists best_of_90s;
+create view best_of_90s as
+	select title, year, film_score, genre, film_votes
+		from aggreg
+		where year > 1989 and year < 2000 and film_votes > 100000
+        order by film_score desc
+        limit 20;
+select * from best_of_90s;
+
+
+
+### Testing the event
+
+select * from aggreg limit 1;
 set sql_safe_updates = 0;
 update ratings
 	set
@@ -337,43 +426,8 @@ update ratings
         distribution = '0100000008'
 	where movieid = 1672052;
 set sql_safe_updates = 1;
-		
 
-;
-select * from ratings;
-select * from aggreg;
-	
+# Uncomment the next line and run after a couple of minutes to see
+# the difference with the previos select:
 
-
-
-select * from aggreg;
-select * from ratings;
-    
-
-select * from movies2actors where leading=1;
-
-
-select * from movies2actors;
-select * from movies;
-select count(*) from movies;
-select * from runningtimes;
-select * from ratings;
-select * from movies where movieid=1674737;
-select * from movies join ratings on movies.movieid=ratings.movieid;
-select year from movies group by year;
-select count(movieid) as lala from movies2directors group by directorid order by lala desc;
-select count(movieid) as lala from movies2directors;
-select count(movieid) as lala from movies2directors group by movieid order by lala desc;
-select count(*) from movies2actors;
-select count(*) from movies2actors where movies2actors.leading=1;
-select actors.name, movies.title
-from movies2actors
-join movies on movies.movieid=movies2actors.movieid
-join actors on actors.actorid=movies2actors.actorid
-where movies2actors.leading=1;
-select * from ratings
-
-
-
-
-
+# select * from aggreg limit 1;
